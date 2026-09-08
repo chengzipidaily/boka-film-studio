@@ -22,6 +22,8 @@ Content-Type: application/json;charset=UTF-8
 | POST | `/video` | 创建视频任务 |
 | GET | `/task/{task_id}` | 查询图片或视频任务 |
 
+另有独立路径 `GET https://api.bonanai.com/api/bkk/task/getBonaHmccOssToken`，不使用上述 film 基础路径。认证相同，响应与上传方式见 [tos.md](tos.md)。
+
 ## 创建云端项目
 
 `POST /create`，请求体：
@@ -123,4 +125,4 @@ python3 scripts/boka_film.py create-project --name "" --dry-run
 {"code":200,"msg":"success","data":{"status":9,"error_code":null,"error_message":null,"result_url":["https://example.com/result.png"]}}
 ```
 
-未提供任务取消、文件上传、云端项目列表、更新或删除接口；不要自行拼接这些接口。无需重新创建任务来查询结果。
+素材上传使用 [TOS 临时凭证和上传流程](tos.md)。未提供任务取消、云端项目列表、更新或删除接口；不要自行拼接这些接口。无需重新创建任务来查询结果。

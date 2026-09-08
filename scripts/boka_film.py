@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""博卡电影云片场 API CLI; Python 3.9+, standard library only."""
+"""博卡电影云片场 API CLI; Python 3.9+, TOS upload optionally requires the tos SDK."""
 import argparse
 import json
+import mimetypes
+import uuid
+from datetime import datetime, timezone
+from contextlib import suppress
 import os
 import sys
 import time
@@ -11,6 +15,11 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 BASE = 'https://api.bonanai.com/api/film/v1/film'
+API_ORIGIN = 'https://api.bonanai.com'
+TOS_TOKEN_PATH = '/api/bkk/task/getBonaHmccOssToken'
+TOS_BUCKET = 'god-chat'
+TOS_ENDPOINT = 'https://tos-cn-beijing.volces.com'
+TOS_REGION = 'cn-beijing'
 CLIENT_ID = '98e4e8de3d6b43a79ad466354474d6d0'
 
 class ApiError(Exception):
@@ -21,14 +30,14 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def request(method, path, payload=None, timeout=30):
+def request(method, path, payload=None, timeout=30, *, api_root=BASE, sensitive=False):
     key = os.environ.get('BOKA_API_KEY', '').strip()
     if not key or key == 'sk-bk-xxxxxxxx':
         raise ApiError('请设置环境变量 BOKA_API_KEY 为真实 API Key')
     headers = {'Authorization': 'Bearer ' + key, 'clientid': CLIENT_ID,
                'Accept': 'application/json', 'Content-Type': 'application/json;charset=UTF-8'}
     body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode('utf-8')
-    req = Request(BASE + path, data=body, headers=headers, method=method)
+    req = Request(api_root + path, data=body, headers=headers, method=method)
     try:
         with build_opener(NoRedirect()).open(req, timeout=timeout) as response:
             result = json.load(response)
@@ -39,8 +48,83 @@ def request(method, path, payload=None, timeout=30):
     except (ValueError, UnicodeError):
         raise ApiError('服务未返回有效 JSON') from None
     if not isinstance(result, dict) or str(result.get('code')) != '200':
+        if sensitive:
+            raise ApiError('获取临时凭证业务失败；响应内容已隐藏')
         raise ApiError('API 业务失败：' + json.dumps(result, ensure_ascii=False).replace(key, '[REDACTED]'))
     return result
+
+
+def get_tos_token():
+    result = request('GET', TOS_TOKEN_PATH, api_root=API_ORIGIN, sensitive=True)
+    try:
+        data = result['data']
+        if data.get('responseMetadata', {}).get('error'):
+            raise ApiError('STS 返回错误；临时凭证不可用')
+        credentials = data['result']['credentials']
+        for key in ('accessKeyId', 'secretAccessKey', 'sessionToken', 'expiredTime'):
+            if not isinstance(credentials.get(key), str) or not credentials[key]:
+                raise ValueError()
+        expires = datetime.fromisoformat(credentials['expiredTime'].replace('Z', '+00:00'))
+        if expires.tzinfo is None:
+            raise ValueError()
+        if (expires - datetime.now(timezone.utc)).total_seconds() <= 30:
+            raise ApiError('TOS 临时凭证已过期或即将过期，请重新获取')
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise ApiError('TOS 响应缺少有效临时凭证或过期时间') from None
+    return result, credentials
+
+
+def token_summary(credentials):
+    return {key: ('[REDACTED]' if key in ('accessKeyId', 'secretAccessKey', 'sessionToken') else value)
+            for key, value in credentials.items()
+            if key in ('accessKeyId', 'secretAccessKey', 'sessionToken', 'currentTime', 'expiredTime')}
+
+
+def save_token(path, result):
+    # Exclusive creation avoids replacing existing files or following symlinks.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump(result, stream, ensure_ascii=False, indent=2)
+        stream.write('\n')
+
+
+def upload_file(file_path, object_key=None, dry_run=False):
+    file_path = file_path.expanduser().resolve()
+    if not file_path.is_file():
+        raise ApiError('待上传文件不存在或不是普通文件')
+    key = object_key if object_key is not None else (
+        f'Pic/{int(time.time() * 1000)}_{uuid.uuid4().hex}{file_path.suffix.lower()}')
+    if not key or key.startswith('/') or any(part in ('.', '..') for part in key.split('/')):
+        raise ApiError('对象 key 必须非空、不能以 / 开头或包含 .、.. 路径段')
+    content_type = mimetypes.guess_type(file_path.name)[0] or 'application/octet-stream'
+    url = f'https://{TOS_BUCKET}.tos-cn-beijing.volces.com/{quote(key, safe="/")}'
+    output = {'bucket': TOS_BUCKET, 'region': TOS_REGION, 'key': key,
+              'url': url, 'content_type': content_type, 'size': file_path.stat().st_size}
+    if dry_run:
+        emit(dict(output, dry_run=True))
+        return
+    try:
+        import tos
+    except ImportError:
+        raise ApiError('上传需要 tos SDK：请安装 requirements-upload.txt 中的依赖') from None
+    _, credentials = get_tos_token()
+    client = None
+    try:
+        client = tos.TosClientV2(
+            credentials['accessKeyId'], credentials['secretAccessKey'],
+            TOS_ENDPOINT, TOS_REGION, security_token=credentials['sessionToken'],
+            max_retry_count=0, high_latency_log_threshold=0)
+        uploaded = client.put_object_from_file(
+            TOS_BUCKET, key, str(file_path), content_type=content_type, forbid_overwrite=True)
+        output.update(etag=uploaded.etag, request_id=uploaded.request_id)
+    except Exception:
+        # SDK exception text can contain signed request details; do not echo it.
+        raise ApiError(f'TOS 上传失败；未自动重试。请检查临时凭证权限、网络及对象是否已存在：{key}') from None
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                client.close()
+    emit(output)
 
 
 def validate_payload(kind, payload):
@@ -109,6 +193,12 @@ def positive(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    token = commands.add_parser('get-tos-token', help='获取临时凭证，默认输出脱敏摘要')
+    token.add_argument('--output', type=Path, help='将完整响应保存为权限 0600 的新文件')
+    upload = commands.add_parser('upload', help='上传本地素材到 god-chat bucket')
+    upload.add_argument('--file', type=Path, required=True)
+    upload.add_argument('--key', help='原始对象 key，不做预先 URL 编码；默认 Pic/ 下唯一文件名')
+    upload.add_argument('--dry-run', action='store_true', help='预览上传目标，不获取凭证或上传')
     models = commands.add_parser('models', help='查询可用模型及能力')
     models.add_argument('--kind', choices=('image', 'video'), required=True)
     project = commands.add_parser('create-project', help='创建云端项目，只提交一次')
@@ -126,7 +216,15 @@ def main(argv=None):
     wait.add_argument('--max-wait', type=positive, default=1200)
     args = parser.parse_args(argv)
     try:
-        if args.command == 'models':
+        if args.command == 'get-tos-token':
+            result, credentials = get_tos_token()
+            if args.output:
+                save_token(args.output, result)
+            emit({'credentials': token_summary(credentials),
+                  'output': str(args.output) if args.output else None})
+        elif args.command == 'upload':
+            upload_file(args.file, args.key, args.dry_run)
+        elif args.command == 'models':
             emit(request('GET', '/models/' + args.kind))
         elif args.command == 'create-project':
             payload = {'name': args.name}
