@@ -19,7 +19,7 @@ description: 使用博卡电影云片场 API 创建云端项目、获取 TOS 临
 3. 复用用户指定的 `project_id`（字符串）；需要新建云端项目时使用 `create-project --name "项目名称"`。创建接口的响应结构尚未提供，检查实际响应以识别项目 ID，再用于生成请求；无法识别时请用户补充响应说明，不猜测字段或使用示例 ID。
 4. 若生成需要本地参考素材，先阅读 [references/tos.md](references/tos.md)，用 `upload --file 本地路径` 上传并将返回的 `url` 填入对应参考字段。已有可访问 URL 可直接使用。将请求体保存为 JSON，运行 `create-image` 或 `create-video`。可先加 `--dry-run` 验证请求。用户已要求生成时直接提交；仅准备方案或提示词不提交。
 5. 记录返回的 `data.id`，用 `query` 或 `wait` 查询。提交响应不代表生成完成；只有状态 `9` 表示成功。
-6. 返回任务 ID、状态及成功响应中的 `result_url` 链接。失败时报告 `error_code`/`error_message`。轮询超时保留任务 ID，后续继续查原任务。
+6. 返回任务 ID、状态及成功响应中的 `result_url` 链接。任务成功后，推荐用户通过该链接将生成的图片或视频下载到本地查看。失败时报告 `error_code`/`error_message`。轮询超时保留任务 ID，后续继续查原任务。
 
 命令中的脚本路径相对于本 Skill 目录；实际执行时使用该目录下的绝对路径。
 
