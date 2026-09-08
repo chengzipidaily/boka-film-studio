@@ -5,7 +5,7 @@ description: 使用博卡电影云片场 API 创建云端项目、获取 TOS 临
 
 # 博卡电影云片场
 
-通过随附 `scripts/boka_film.py` 调用博卡 API。需要 Python 3.9+；博卡 API 命令仅依赖标准库，上传需安装 `requirements-upload.txt` 中的官方 `tos` SDK。
+通过随附 `scripts/boka_film.py` 调用博卡 API。需要 Python 3.9+，所有命令仅依赖标准库。上传通过 TOS4 签名的 HTTP PUT 完成，无需 SDK 或额外客户端。
 
 ## 配置
 

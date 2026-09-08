@@ -7,7 +7,8 @@ import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from urllib.error import HTTPError
+import hashlib
 from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location('boka_film', Path(__file__).parents[1] / 'scripts/boka_film.py')
@@ -59,34 +60,46 @@ class TosTests(unittest.TestCase):
             self.assertTrue(result['dry_run'])
             self.assertEqual(result['content_type'], 'image/jpeg')
 
-    def test_upload_passes_sts_to_sdk_and_returns_no_credentials(self):
+    def test_upload_sends_signed_stream_without_sdk(self):
         with tempfile.TemporaryDirectory() as directory:
-            file = Path(directory) / 'test.mp4'
-            file.write_bytes(b'fake-video')
-            client = Mock()
-            client.put_object_from_file.return_value = SimpleNamespace(etag='etag', request_id='request')
-            sdk = SimpleNamespace(TosClientV2=Mock(return_value=client))
-            with patch.dict('sys.modules', {'tos': sdk}), patch.object(boka, 'request', return_value=token()), redirect_stdout(io.StringIO()) as out:
-                boka.upload_file(file, 'Pic/video.mp4')
-            sdk.TosClientV2.assert_called_once_with('fake-ak', 'fake-sk', boka.TOS_ENDPOINT, 'cn-beijing',
-                security_token='fake-token', max_retry_count=0, high_latency_log_threshold=0)
-            client.put_object_from_file.assert_called_once_with('god-chat', 'Pic/video.mp4', str(file.resolve()),
-                content_type='video/mp4', forbid_overwrite=True)
-            client.close.assert_called_once()
+            file = Path(directory) / 'test.png'
+            file.write_bytes(b'fake-image')
+            captured = {}
+            class Response:
+                headers = {'ETag': 'etag', 'x-tos-request-id': 'request'}
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+            def send(req, timeout):
+                captured['request'] = req
+                captured['body'] = req.data.read()
+                return Response()
+            opener = Mock()
+            opener.open.side_effect = send
+            with patch.object(boka, 'build_opener', return_value=opener), patch.object(boka, 'request', return_value=token()), redirect_stdout(io.StringIO()) as out:
+                boka.upload_file(file, 'Pic/测试.png')
+            req = captured['request']
+            self.assertEqual(req.method, 'PUT')
+            self.assertEqual(captured['body'], b'fake-image')
+            self.assertEqual(req.get_header('Content-length'), '10')
+            self.assertEqual(req.get_header('X-tos-content-sha256'), hashlib.sha256(b'fake-image').hexdigest())
+            self.assertEqual(req.get_header('X-tos-security-token'), 'fake-token')
+            self.assertEqual(req.get_header('X-tos-forbid-overwrite'), 'true')
+            self.assertTrue(req.get_header('Authorization').startswith('TOS4-HMAC-SHA256 '))
             self.assertNotIn('fake-', out.getvalue())
             self.assertEqual(json.loads(out.getvalue())['etag'], 'etag')
+            opener.open.assert_called_once()
 
-    def test_sdk_failure_is_redacted_and_not_retried(self):
+    def test_http_failure_is_redacted_and_not_retried(self):
         with tempfile.TemporaryDirectory() as directory:
             file = Path(directory) / 'test.jpg'
             file.write_bytes(b'fake')
-            client = Mock()
-            client.put_object_from_file.side_effect = RuntimeError('fake-token fake-sk')
-            with patch.dict('sys.modules', {'tos': SimpleNamespace(TosClientV2=Mock(return_value=client))}), \
-                    patch.object(boka, 'request', return_value=token()), redirect_stderr(io.StringIO()) as err:
+            opener = Mock()
+            opener.open.side_effect = HTTPError('https://example.com', 403, 'fake-token fake-sk', {}, None)
+            with patch.object(boka, 'build_opener', return_value=opener), patch.object(boka, 'request', return_value=token()), redirect_stderr(io.StringIO()) as err:
                 self.assertEqual(boka.main(['upload', '--file', str(file)]), 1)
             self.assertNotIn('fake-', err.getvalue())
-            self.assertEqual(client.put_object_from_file.call_count, 1)
+            self.assertIn('403', err.getvalue())
+            opener.open.assert_called_once()
 
     def test_existing_project_route(self):
         with patch.object(boka, 'request', return_value={'code': 200}) as req, redirect_stdout(io.StringIO()):

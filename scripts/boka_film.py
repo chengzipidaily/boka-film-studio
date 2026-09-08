@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""博卡电影云片场 API CLI; Python 3.9+, TOS upload optionally requires the tos SDK."""
+"""博卡电影云片场 API CLI; Python 3.9+, standard library only, including signed TOS uploads."""
 import argparse
 import json
 import mimetypes
+import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
-from contextlib import suppress
 import os
 import sys
 import time
@@ -88,6 +89,31 @@ def save_token(path, result):
         stream.write('\n')
 
 
+def tos_signed_headers(key, credentials, content_type, payload_hash, timestamp=None):
+    """Sign a query-free PUT using TOS4-HMAC-SHA256 (raw SK, no AWS4 prefix)."""
+    date = timestamp or datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    host = f'{TOS_BUCKET}.{urlparse(TOS_ENDPOINT).netloc}'
+    headers = {'host': host, 'content-type': content_type,
+               'x-tos-date': date, 'x-tos-content-sha256': payload_hash,
+               'x-tos-security-token': credentials['sessionToken'],
+               'x-tos-forbid-overwrite': 'true'}
+    names = sorted(headers)
+    signed_names = ';'.join(names)
+    canonical_headers = ''.join(f'{name}:{headers[name]}\n' for name in names)
+    canonical_request = '\n'.join(('PUT', quote('/' + key, safe='/~'), '',
+                                   canonical_headers, signed_names, payload_hash))
+    scope = f'{date[:8]}/{TOS_REGION}/tos/request'
+    string_to_sign = '\n'.join(('TOS4-HMAC-SHA256', date, scope,
+                               hashlib.sha256(canonical_request.encode()).hexdigest()))
+    signing_key = credentials['secretAccessKey'].encode()
+    for value in (date[:8], TOS_REGION, 'tos', 'request'):
+        signing_key = hmac.new(signing_key, value.encode(), hashlib.sha256).digest()
+    signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+    headers['Authorization'] = (f'TOS4-HMAC-SHA256 Credential={credentials["accessKeyId"]}/{scope}, '
+                                f'SignedHeaders={signed_names}, Signature={signature}')
+    return headers
+
+
 def upload_file(file_path, object_key=None, dry_run=False):
     file_path = file_path.expanduser().resolve()
     if not file_path.is_file():
@@ -104,26 +130,25 @@ def upload_file(file_path, object_key=None, dry_run=False):
         emit(dict(output, dry_run=True))
         return
     try:
-        import tos
-    except ImportError:
-        raise ApiError('上传需要 tos SDK：请安装 requirements-upload.txt 中的依赖') from None
-    _, credentials = get_tos_token()
-    client = None
-    try:
-        client = tos.TosClientV2(
-            credentials['accessKeyId'], credentials['secretAccessKey'],
-            TOS_ENDPOINT, TOS_REGION, security_token=credentials['sessionToken'],
-            max_retry_count=0, high_latency_log_threshold=0)
-        uploaded = client.put_object_from_file(
-            TOS_BUCKET, key, str(file_path), content_type=content_type, forbid_overwrite=True)
-        output.update(etag=uploaded.etag, request_id=uploaded.request_id)
-    except Exception:
-        # SDK exception text can contain signed request details; do not echo it.
-        raise ApiError(f'TOS 上传失败；未自动重试。请检查临时凭证权限、网络及对象是否已存在：{key}') from None
-    finally:
-        if client is not None:
-            with suppress(Exception):
-                client.close()
+        with file_path.open('rb') as stream:
+            # Hash and send in chunks so large media are not loaded into memory.
+            digest = hashlib.sha256()
+            size = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+                size += len(chunk)
+            stream.seek(0)
+            _, credentials = get_tos_token()
+            headers = tos_signed_headers(key, credentials, content_type, digest.hexdigest())
+            headers['Content-Length'] = str(size)
+            req = Request(url, data=stream, headers=headers, method='PUT')
+            with build_opener(NoRedirect()).open(req, timeout=60) as response:
+                output.update(size=size, etag=response.headers.get('ETag'),
+                              request_id=response.headers.get('x-tos-request-id'))
+    except HTTPError as exc:
+        raise ApiError(f'TOS 上传 HTTP {exc.code}；未自动重试。请检查凭证权限、签名及对象是否已存在：{key}') from None
+    except (URLError, TimeoutError, OSError):
+        raise ApiError(f'TOS 上传失败或结果不确定；未自动重试，请核查对象：{key}') from None
     emit(output)
 
 
