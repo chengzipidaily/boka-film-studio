@@ -1,0 +1,3 @@
+interface:
+  display_name: "博卡电影云片场"
+  short_description: "通过博卡电影云片场生成图片和视频，查询模型能力并跟踪任务结果"
