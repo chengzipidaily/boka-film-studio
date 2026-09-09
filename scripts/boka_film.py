@@ -3,6 +3,7 @@
 import argparse
 import json
 import mimetypes
+import math
 import hashlib
 import hmac
 import uuid
@@ -208,6 +209,50 @@ def wait_task(task_id, interval, max_wait):
             time.sleep(min(interval, remaining))
 
 
+def project_tasks_path(project_id):
+    if not project_id.strip() or project_id in ('.', '..'):
+        raise ApiError('project_id 必须为有效的非空字符串')
+    return '/resource/generated/list/' + quote(project_id, safe='')
+
+
+def validate_canvas_resources(resources):
+    if not isinstance(resources, list) or not resources:
+        raise ApiError('画布请求体必须是非空资源数组')
+    seen = set()
+    for resource in resources:
+        if not isinstance(resource, dict):
+            raise ApiError('画布资源必须是对象')
+        node_id = resource.get('id')
+        if not isinstance(node_id, str) or not node_id.strip() or node_id in seen:
+            raise ApiError('资源 id 必须是非空且批次内不重复的节点 ID')
+        seen.add(node_id)
+        if not isinstance(resource.get('canvas'), str) or not resource['canvas'].strip():
+            raise ApiError('每个资源必须指定非空 canvas 画布名称')
+        node = resource.get('webLocation')
+        if not isinstance(node, dict) or node.get('id') != node_id:
+            raise ApiError('webLocation 必须是节点对象，且 id 与外层资源 id 一致')
+        kind = node.get('type')
+        if kind not in ('image', 'video'):
+            raise ApiError('保存命令支持 image 或 video 媒体节点')
+        position = node.get('position')
+        if not isinstance(position, dict) or any(
+            isinstance(position.get(axis), bool) or not isinstance(position.get(axis), (int, float))
+            or not math.isfinite(position[axis]) for axis in ('x', 'y')
+        ):
+            raise ApiError('节点 position.x/y 必须是有限数字')
+        data = node.get('data')
+        if not isinstance(data, dict) or not isinstance(data.get('taskId'), str):
+            raise ApiError('节点 data 必须含字符串 taskId；仅上传素材可填空字符串')
+        url = data.get('imageUrl' if kind == 'image' else 'videoUrl')
+        if not isinstance(url, str) or urlparse(url).scheme not in ('http', 'https') or not urlparse(url).netloc:
+            raise ApiError('节点必须提供对应的 HTTP(S) imageUrl 或 videoUrl')
+        for dimension in ('width', 'height'):
+            if dimension in data and (isinstance(data[dimension], bool)
+                or not isinstance(data[dimension], (int, float))
+                or not math.isfinite(data[dimension]) or data[dimension] <= 0):
+                raise ApiError('节点 width/height 必须是正的有限数字')
+
+
 def positive(value):
     number = int(value)
     if number <= 0:
@@ -233,6 +278,16 @@ def main(argv=None):
         create = commands.add_parser('create-' + kind, help='提交生成任务，默认只提交一次')
         create.add_argument('--payload', type=Path, required=True, help='请求 JSON 文件')
         create.add_argument('--dry-run', action='store_true', help='仅校验并输出请求体，不请求 API')
+    tasks = commands.add_parser('list-tasks', help='查询项目下所有生成任务')
+    tasks.add_argument('--project-id', required=True, help='项目 ID（字符串）')
+    tasks.add_argument('--dry-run', action='store_true', help='预览 POST 地址，不发送请求')
+    for action in ('canvas-list', 'canvas-resources', 'save-canvas'):
+        canvas = commands.add_parser(action, help={'canvas-list': '列出项目已有画布',
+            'canvas-resources': '查询项目画布资源', 'save-canvas': '批量保存图片或视频节点到画布'}[action])
+        canvas.add_argument('--project-id', required=True)
+        canvas.add_argument('--dry-run', action='store_true', help='仅预览请求，不调用 API')
+        if action == 'save-canvas':
+            canvas.add_argument('--payload', type=Path, required=True, help='资源数组 JSON 文件')
     query = commands.add_parser('query', help='查询已有任务')
     query.add_argument('--task-id', required=True)
     wait = commands.add_parser('wait', help='有界轮询已有任务')
@@ -265,6 +320,26 @@ def main(argv=None):
                 emit({'method': 'POST', 'url': BASE + '/' + kind, 'payload': payload})
             else:
                 emit(request('POST', '/' + kind, payload))
+        elif args.command == 'list-tasks':
+            path = project_tasks_path(args.project_id)
+            if args.dry_run:
+                emit({'method': 'POST', 'url': BASE + path, 'payload': None})
+            else:
+                emit(request('POST', path))
+        elif args.command in ('canvas-list', 'canvas-resources', 'save-canvas'):
+            project_id = project_tasks_path(args.project_id).rsplit('/', 1)[-1]
+            prefix = {'canvas-list': '/resource/canvas/list/',
+                      'canvas-resources': '/resource/list/',
+                      'save-canvas': '/resource/save/batch/'}[args.command]
+            path = prefix + project_id
+            payload = None
+            if args.command == 'save-canvas':
+                payload = json.loads(args.payload.read_text(encoding='utf-8'))
+                validate_canvas_resources(payload)
+            if args.dry_run:
+                emit({'method': 'POST', 'url': BASE + path, 'payload': payload})
+            else:
+                emit(request('POST', path, payload))
         elif args.command == 'query':
             emit(request('GET', task_path(args.task_id)))
         else:

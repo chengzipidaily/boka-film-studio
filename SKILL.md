@@ -1,6 +1,6 @@
 ---
 name: boka-film-studio
-description: 使用博卡电影云片场 API 创建云端项目、获取 TOS 临时凭证和上传素材、查询模型、生成图片和视频、查询及等待生成任务。适用于用户要求通过博卡或 Boka 创建云端项目、制作图片、参考素材视频或首尾帧视频；仅编写提示词时不调用 API。
+description: 使用博卡电影云片场 API 创建云端项目、获取 TOS 临时凭证和上传素材、查询模型、生成图片和视频、查询项目下全部生成任务及单个任务状态，并将图片或视频保存到项目画布。适用于用户要求通过博卡或 Boka 创建云端项目、制作图片、参考素材视频或首尾帧视频；仅编写提示词时不调用 API。
 ---
 
 # 博卡电影云片场
@@ -16,10 +16,12 @@ description: 使用博卡电影云片场 API 创建云端项目、获取 TOS 临
 
 1. 按需阅读 [references/api.md](references/api.md)，选择图片、参考视频或首尾帧视频请求结构。
 2. 使用 `models --kind image` 或 `models --kind video` 获取当前模型及能力，以响应为准选择版本、分辨率、比例和时长，保留大小写。示例不是当前能力清单。
-3. 复用用户指定的 `project_id`（字符串）；需要新建云端项目时使用 `create-project --name "项目名称"`。创建接口的响应结构尚未提供，检查实际响应以识别项目 ID，再用于生成请求；无法识别时请用户补充响应说明，不猜测字段或使用示例 ID。
+3. 复用用户指定的 `project_id`（字符串）；需要新建云端项目时使用 `create-project --name "项目名称"`。从成功响应的 `data.id` 获取项目 ID，再用于生成请求；以字符串保留 ID。
 4. 若生成需要本地参考素材，先阅读 [references/tos.md](references/tos.md)，用 `upload --file 本地路径` 上传并将返回的 `url` 填入对应参考字段。已有可访问 URL 可直接使用。将请求体保存为 JSON，运行 `create-image` 或 `create-video`。可先加 `--dry-run` 验证请求。用户已要求生成时直接提交；仅准备方案或提示词不提交。
 5. 记录返回的 `data.id`，用 `query` 或 `wait` 查询。提交响应不代表生成完成；只有状态 `9` 表示成功。
-6. 返回任务 ID、状态及成功响应中的 `result_url` 链接。任务成功后，推荐用户通过该链接将生成的图片或视频下载到本地查看。失败时报告 `error_code`/`error_message`。轮询超时保留任务 ID，后续继续查原任务。
+6. 用户要查看某项目下的全部生成任务时，使用 `list-tasks --project-id 项目ID`；该接口与其他 film 接口统一使用线上 API 地址，详见 [references/api.md](references/api.md)。完整保留列表响应，不自行猜测筛选或分页参数。
+7. 用户要求保存到画布时，阅读 [references/canvas.md](references/canvas.md)，查询目标画布及现有资源，准备节点数组，用 `save-canvas --project-id 项目ID --payload canvas.json` 保存，再查询核对。生成成功或 TOS 上传成功不代表已保存到画布；仅生成请求不默认写入画布。
+8. 返回任务 ID、状态及成功响应中的 `result_url` 链接。任务成功后，推荐用户通过该链接将生成的图片或视频下载到本地查看。失败时报告 `error_code`/`error_message`。轮询超时保留任务 ID，后续继续查原任务。
 
 命令中的脚本路径相对于本 Skill 目录；实际执行时使用该目录下的绝对路径。
 
@@ -34,6 +36,11 @@ python3 scripts/boka_film.py models --kind video
 python3 scripts/boka_film.py create-image --payload image.json --dry-run
 python3 scripts/boka_film.py create-image --payload image.json
 python3 scripts/boka_film.py create-video --payload video.json
+python3 scripts/boka_film.py list-tasks --project-id 123
+python3 scripts/boka_film.py canvas-list --project-id 123
+python3 scripts/boka_film.py canvas-resources --project-id 123
+python3 scripts/boka_film.py save-canvas --project-id 123 --payload canvas.json --dry-run
+python3 scripts/boka_film.py save-canvas --project-id 123 --payload canvas.json
 python3 scripts/boka_film.py query --task-id TASK_ID
 python3 scripts/boka_film.py wait --task-id TASK_ID --interval 10 --max-wait 1200
 ```

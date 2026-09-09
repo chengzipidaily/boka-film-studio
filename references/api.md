@@ -21,8 +21,34 @@ Content-Type: application/json;charset=UTF-8
 | POST | `/image` | 创建图片任务 |
 | POST | `/video` | 创建视频任务 |
 | GET | `/task/{task_id}` | 查询图片或视频任务 |
+| POST | `/resource/generated/list/{project_id}` | 查询项目下全部生成任务 |
 
 另有独立路径 `GET https://api.bonanai.com/api/bkk/task/getBonaHmccOssToken`，不使用上述 film 基础路径。认证相同，响应与上传方式见 [tos.md](tos.md)。
+
+## 查询项目下所有生成任务
+
+线上接口（与其他 film 接口统一走 API 网关）：
+
+```bash
+curl -X POST 'https://api.bonanai.com/api/film/v1/film/resource/generated/list/123'
+```
+
+`123` 为项目 ID，路径参数按字符串处理。方法为 **POST**，示例无请求体。使用与其他 film 接口相同的基础地址，追加 `/resource/generated/list/{project_id}`。
+
+```bash
+python3 scripts/boka_film.py list-tasks --project-id 123
+python3 scripts/boka_film.py list-tasks --project-id 123 --dry-run
+```
+
+默认地址为 `https://api.bonanai.com/api/film/v1/film/resource/generated/list/{project_id}`，无需指定服务地址。
+
+沿用先前全局认证要求：`BOKA_API_KEY` 的 Bearer 认证与固定 `clientid`。精简 curl 未展示请求头，不据此取消认证；`--dry-run` 无需密钥。
+
+响应示例尚未提供，当前沿用现有 API 的 `code: 200` 成功封装并完整输出响应，不假定任务列表字段、不汇总或截断结果。分页、筛选参数尚未提供，不自动添加页码或请求体。若实际响应显示分页，则需要补充分页协议后才能确认取全。
+
+## 画布资源
+
+保存与查询画布使用同一线上 API 基础地址，接口、节点结构及完整流程见 [canvas.md](canvas.md)。
 
 ## 创建云端项目
 
@@ -39,7 +65,7 @@ python3 scripts/boka_film.py create-project --name "春日短片"
 python3 scripts/boka_film.py create-project --name "" --dry-run
 ```
 
-复用相同认证头。响应结构尚未提供，CLI 原样输出业务成功响应，不假定项目 ID 位于 `data.id` 或自动串联生成任务。确认实际返回的项目 ID 后，以字符串填入图片或视频请求的 `project_id`。创建请求不自动重试。
+复用相同认证头。根据前端 `src/types/project.ts` 的 `ProjectInfo`，创建项目返回对象含 `id`；原始 API 成功封装中读取 `data.id`。CLI 原样输出响应，不自动串联生成任务。确认实际返回的项目 ID 后，以字符串填入图片或视频请求的 `project_id`。创建请求不自动重试。
 
 ## 生成请求体
 
